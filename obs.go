@@ -9,9 +9,11 @@ import (
     "net/http"
     "os"
     "os/exec"
+    "os/user"
     "path/filepath"
-    "runtime"
+    "strconv"
     "strings"
+    "syscall"
     "sync"
     "time"
 )
@@ -146,13 +148,8 @@ func logRequest(r *http.Request) {
 }
 
 func listFiles(w http.ResponseWriter, r *http.Request, currentDir string) {
-    var cmd *exec.Cmd
-    if runtime.GOOS == "windows" {
-        cmd = exec.Command("cmd", "/C", "dir", currentDir)
-    } else {
-        cmd = exec.Command("ls", "-la", currentDir)
-    }
-
+    cmd := exec.Command("ls", "-la", currentDir)
+    
     output, err := cmd.CombinedOutput()
     if err != nil {
         http.Error(w, fmt.Sprintf("Error executing command: %s", err), http.StatusInternalServerError)
@@ -234,7 +231,38 @@ func deleteFile(w http.ResponseWriter, r *http.Request, currentDir string) {
         return
     }
 
-    err := os.Remove(filePath)
+    fileInfo, err := os.Stat(filePath)
+    if err != nil {
+        http.Error(w, "Error accessing file", http.StatusInternalServerError)
+        return
+    }
+
+    stat, ok := fileInfo.Sys().(*syscall.Stat_t)
+    if !ok {
+        http.Error(w, "Could not get file owner info", http.StatusInternalServerError)
+        return
+    }
+
+    // Get current user
+    currentUser, err := user.Current()
+    if err != nil {
+        http.Error(w, "Could not determine current user", http.StatusInternalServerError)
+        return
+    }
+
+    uid, err := strconv.ParseUint(currentUser.Uid, 10, 32)
+    if err != nil {
+        http.Error(w, "Error parsing UID", http.StatusInternalServerError)
+        return
+    }
+
+    // Check if current user owns the file
+    if stat.Uid != uint32(uid) {
+        http.Error(w, "Permission denied: you can only delete files you own", http.StatusForbidden)
+        return
+    }
+
+    err = os.Remove(filePath)
     if err != nil {
         log.Printf("Error deleting file: %v", err)
         http.Error(w, "Error deleting file", http.StatusInternalServerError)
